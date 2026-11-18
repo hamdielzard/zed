@@ -809,6 +809,143 @@ pub enum BorderStyle {
     Dashed = 1,
 }
 
+/// A uniform scale about a point, applied to primitives as they are painted, in device pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Zoom {
+    scale: f32,
+    offset: Point<ScaledPixels>,
+}
+
+impl Default for Zoom {
+    fn default() -> Self {
+        Self::IDENTITY
+    }
+}
+
+impl Zoom {
+    pub(crate) const IDENTITY: Self = Self {
+        scale: 1.,
+        offset: Point {
+            x: ScaledPixels(0.),
+            y: ScaledPixels(0.),
+        },
+    };
+
+    /// Scales by `factor` about `center`.
+    pub(crate) fn about(center: Point<ScaledPixels>, factor: f32) -> Self {
+        Self {
+            scale: factor,
+            offset: center * (1. - factor),
+        }
+    }
+
+    /// This zoom, then `outer`.
+    pub(crate) fn then(self, outer: Self) -> Self {
+        Self {
+            scale: self.scale * outer.scale,
+            offset: self.offset * outer.scale + outer.offset,
+        }
+    }
+
+    pub(crate) fn is_identity(&self) -> bool {
+        *self == Self::IDENTITY
+    }
+
+    pub(crate) fn point(&self, p: Point<ScaledPixels>) -> Point<ScaledPixels> {
+        p * self.scale + self.offset
+    }
+
+    fn length(&self, l: ScaledPixels) -> ScaledPixels {
+        l * self.scale
+    }
+
+    pub(crate) fn bounds(&self, b: Bounds<ScaledPixels>) -> Bounds<ScaledPixels> {
+        Bounds {
+            origin: self.point(b.origin),
+            size: b.size.map(|l| self.length(l)),
+        }
+    }
+
+    fn mask(&self, m: ContentMask<ScaledPixels>) -> ContentMask<ScaledPixels> {
+        ContentMask {
+            bounds: self.bounds(m.bounds),
+        }
+    }
+
+    fn corners(&self, c: Corners<ScaledPixels>) -> Corners<ScaledPixels> {
+        c.map(|r| self.length(*r))
+    }
+
+    /// `m` as it acts on zoomed positions: unzoom, apply `m`, zoom.
+    fn conjugate(&self, m: TransformationMatrix) -> TransformationMatrix {
+        let r = m.rotation_scale;
+        let (ox, oy) = (self.offset.x.0, self.offset.y.0);
+        TransformationMatrix {
+            rotation_scale: r,
+            translation: [
+                self.scale * m.translation[0] + ox - (r[0][0] * ox + r[0][1] * oy),
+                self.scale * m.translation[1] + oy - (r[1][0] * ox + r[1][1] * oy),
+            ],
+        }
+    }
+}
+
+impl Primitive {
+    /// This primitive as drawn under `zoom`. Paths are zoomed before they are binned, so they
+    /// pass through unchanged.
+    pub(crate) fn zoomed(self, zoom: &Zoom) -> Self {
+        let z = zoom;
+        match self {
+            Primitive::Shadow(s) => Primitive::Shadow(Shadow {
+                blur_radius: z.length(s.blur_radius),
+                bounds: z.bounds(s.bounds),
+                corner_radii: z.corners(s.corner_radii),
+                content_mask: z.mask(s.content_mask),
+                shape_bounds: z.bounds(s.shape_bounds),
+                shape_corner_radii: z.corners(s.shape_corner_radii),
+                ..s
+            }),
+            Primitive::Quad(q) => Primitive::Quad(Quad {
+                bounds: z.bounds(q.bounds),
+                content_mask: z.mask(q.content_mask),
+                corner_radii: z.corners(q.corner_radii),
+                border_widths: q.border_widths.map(|w| z.length(*w)),
+                ..q
+            }),
+            Primitive::Underline(u) => Primitive::Underline(Underline {
+                bounds: z.bounds(u.bounds),
+                content_mask: z.mask(u.content_mask),
+                thickness: z.length(u.thickness),
+                ..u
+            }),
+            Primitive::MonochromeSprite(s) => Primitive::MonochromeSprite(MonochromeSprite {
+                bounds: z.bounds(s.bounds),
+                content_mask: z.mask(s.content_mask),
+                transformation: z.conjugate(s.transformation),
+                ..s
+            }),
+            Primitive::SubpixelSprite(s) => Primitive::SubpixelSprite(SubpixelSprite {
+                bounds: z.bounds(s.bounds),
+                content_mask: z.mask(s.content_mask),
+                transformation: z.conjugate(s.transformation),
+                ..s
+            }),
+            Primitive::PolychromeSprite(s) => Primitive::PolychromeSprite(PolychromeSprite {
+                bounds: z.bounds(s.bounds),
+                content_mask: z.mask(s.content_mask),
+                corner_radii: z.corners(s.corner_radii),
+                ..s
+            }),
+            Primitive::Surface(s) => Primitive::Surface(PaintSurface {
+                bounds: z.bounds(s.bounds),
+                content_mask: z.mask(s.content_mask),
+                ..s
+            }),
+            path @ Primitive::Path(_) => path,
+        }
+    }
+}
+
 /// A data type representing a 2 dimensional transformation that can be applied to an element.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(C)]
@@ -981,6 +1118,16 @@ pub(crate) struct SpriteAnimation {
 }
 
 impl SpriteAnimation {
+    /// This animation for a sprite drawn under `zoom`: it turns about the zoomed center.
+    pub(crate) fn zoomed(mut self, zoom: &Zoom, scale_factor: f32) -> Self {
+        let center = zoom.point(self.center.scale(scale_factor));
+        self.center = crate::point(
+            crate::px(center.x.0 / scale_factor),
+            crate::px(center.y.0 / scale_factor),
+        );
+        self
+    }
+
     pub(crate) fn new(
         transformation: TimedTransformation,
         center: Point<Pixels>,

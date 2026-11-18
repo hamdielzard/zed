@@ -301,6 +301,9 @@ pub struct Style {
     /// The opacity of this element
     pub opacity: Option<f32>,
 
+    /// How much this element and its children are scaled when drawn, about their center.
+    pub zoom: Option<f32>,
+
     /// The grid columns of this element
     /// Roughly equivalent to the Tailwind `grid-cols-<number>`
     pub grid_cols: Option<GridTemplate>,
@@ -809,6 +812,7 @@ impl Default for Style {
             text: TextStyleRefinement::default(),
             mouse_cursor: None,
             opacity: None,
+            zoom: None,
             grid_rows: None,
             grid_cols: None,
             grid_location: None,

@@ -398,6 +398,25 @@ impl Path {
         }
     }
 
+    /// This path scaled by `scale` and then moved by `offset`, in logical pixels.
+    pub(crate) fn zoomed(&self, scale: f32, offset: Point<f32>) -> Self {
+        let curves = self
+            .curves
+            .iter()
+            .map(|c| PathCurve {
+                p0: c.p0 * scale + offset,
+                p1: c.p1 * scale + offset,
+                a: c.a * scale,
+                b: c.b * scale,
+                ..*c
+            })
+            .collect::<Vec<_>>();
+        Self {
+            curves: curves.into(),
+            even_odd: self.even_odd,
+        }
+    }
+
     pub(crate) fn even_odd(&self) -> bool {
         self.even_odd
     }

@@ -16,15 +16,16 @@ use crate::{
     Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers, ModifiersChangedEvent,
     MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, PaintedPath, Path,
     Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow,
-    Point, PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams,
-    RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
-    SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow, SharedString, Size,
-    SpriteAnimation, SpriteAnimationId, StrikethroughStyle, Style, SubpixelSprite, Subscription,
-    SystemWindowTab, SystemWindowTabController, TabStopMap, Task, TextInputConfiguration,
-    TextInputStateChange, TextRenderingMode, TextStyle, TextStyleRefinement, ThermalState,
-    TransformationMatrix, Underline, UnderlineStyle, WindowAppearance, WindowBackgroundAppearance,
-    WindowBounds, WindowControls, WindowDecorations, WindowInsets, WindowOptions, WindowParams,
-    WindowTextSystem, WindowVisibility, point, prelude::*, px, rems, size, transparent_black,
+    Point, PolychromeSprite, Primitive, Priority, PromptButton, PromptLevel, Quad, Render,
+    RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge,
+    SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow,
+    SharedString, Size, SpriteAnimation, SpriteAnimationId, StrikethroughStyle, Style,
+    SubpixelSprite, Subscription, SystemWindowTab, SystemWindowTabController, TabStopMap, Task,
+    TextInputConfiguration, TextInputStateChange, TextRenderingMode, TextStyle,
+    TextStyleRefinement, ThermalState, TransformationMatrix, Underline, UnderlineStyle,
+    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControls, WindowDecorations,
+    WindowInsets, WindowOptions, WindowParams, WindowTextSystem, WindowVisibility, Zoom, point,
+    prelude::*, px, rems, size, transparent_black,
 };
 
 use crate::gestures::{GestureTuning, RecognizedTouchGesture, TouchGestureRecognizer};
@@ -1253,6 +1254,7 @@ pub struct Window {
     pub(crate) rendered_entity_stack: Vec<EntityId>,
     pub(crate) element_offset_stack: Vec<Point<Pixels>>,
     pub(crate) element_opacity: f32,
+    element_zoom: Zoom,
     pub(crate) content_mask_stack: Vec<ContentMask<Pixels>>,
     pub(crate) requested_autoscroll: Option<Bounds<Pixels>>,
     /// The [`TextInputConfiguration`] most recently forwarded to the platform
@@ -2413,6 +2415,7 @@ impl Window {
             element_offset_stack: Vec::new(),
             content_mask_stack: Vec::new(),
             element_opacity: 1.0,
+            element_zoom: Zoom::IDENTITY,
             requested_autoscroll: None,
             last_text_input_configuration: None,
             focused_text_input: None,
@@ -3583,7 +3586,7 @@ impl Window {
         self.invalidator.debug_assert_paint();
         let underline = self.underline(origin, width, style);
         if exclusions.is_empty() {
-            self.next_frame.scene.insert_primitive(underline);
+            self.insert_primitive(underline);
             return;
         }
 
@@ -3601,13 +3604,13 @@ impl Window {
             })
             .collect::<SmallVec<[_; 4]>>();
         if exclusions.is_empty() {
-            self.next_frame.scene.insert_primitive(underline);
+            self.insert_primitive(underline);
             return;
         }
         exclusions.sort_unstable_by_key(|span| span.start);
 
         let mut paint_span = |start, end| {
-            self.next_frame.scene.insert_primitive(Underline {
+            self.insert_primitive(Underline {
                 content_mask: ContentMask {
                     bounds: Bounds::from_corners(
                         point(start, bounds.top()),
@@ -4601,6 +4604,39 @@ impl Window {
         result
     }
 
+    /// Draws what `f` paints scaled by `zoom` about `center`, on top of any zoom already in
+    /// effect. Layout and hit testing are not zoomed.
+    pub(crate) fn with_element_zoom<R>(
+        &mut self,
+        zoom: Option<f32>,
+        center: Point<Pixels>,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let Some(factor) = zoom.filter(|z| *z != 1.) else {
+            return f(self);
+        };
+        let previous = self.element_zoom;
+        let center = previous.point(center.scale(self.scale_factor()));
+        self.element_zoom = previous.then(Zoom::about(center, factor));
+        let result = f(self);
+        self.element_zoom = previous;
+        result
+    }
+
+    pub(crate) fn element_zoom(&self) -> Zoom {
+        self.element_zoom
+    }
+
+    fn insert_primitive(&mut self, primitive: impl Into<Primitive>) {
+        let primitive = primitive.into();
+        if self.element_zoom.is_identity() {
+            self.next_frame.scene.insert_primitive(primitive);
+        } else {
+            let primitive = primitive.zoomed(&self.element_zoom);
+            self.next_frame.scene.insert_primitive(primitive);
+        }
+    }
+
     /// Perform prepaint on child elements in a "retryable" manner, so that any side effects
     /// of prepaints can be discarded before prepainting again. This is used to support autoscroll
     /// where we need to prepaint children to detect the autoscroll bounds, then adjust the
@@ -4943,7 +4979,7 @@ impl Window {
                 continue;
             }
             let blur_radius = shadow.blur_radius.scale(scale_factor);
-            self.next_frame.scene.insert_primitive(Shadow {
+            self.insert_primitive(Shadow {
                 order: 0,
                 blur_radius,
                 // Leave room for the tail of the blur.
@@ -4989,7 +5025,7 @@ impl Window {
                 bottom_right: (corner_radii.bottom_right - shadow.spread_radius).max(zero),
                 bottom_left: (corner_radii.bottom_left - shadow.spread_radius).max(zero),
             };
-            self.next_frame.scene.insert_primitive(Shadow {
+            self.insert_primitive(Shadow {
                 order: 0,
                 blur_radius: shadow.blur_radius.scale(scale_factor),
                 bounds: element_bounds,
@@ -5085,7 +5121,7 @@ impl Window {
         let is_rectangle =
             quad.border_widths == Edges::default() && quad.corner_radii == Corners::default();
         if has_background && is_rectangle {
-            self.next_frame.scene.insert_primitive(quad);
+            self.insert_primitive(quad);
             return;
         }
 
@@ -5116,12 +5152,12 @@ impl Window {
         };
 
         if inner_bounds.is_empty() {
-            self.next_frame.scene.insert_primitive(strip_quad);
+            self.insert_primitive(strip_quad);
             return;
         }
 
         if has_background {
-            self.next_frame.scene.insert_primitive(Quad {
+            self.insert_primitive(Quad {
                 content_mask: ContentMask {
                     bounds: quad.content_mask.bounds.intersect(&inner_bounds),
                 },
@@ -5155,7 +5191,7 @@ impl Window {
         ];
 
         for strip in strips {
-            self.next_frame.scene.insert_primitive(Quad {
+            self.insert_primitive(Quad {
                 content_mask: ContentMask {
                     bounds: quad.content_mask.bounds.intersect(&strip),
                 },
@@ -5171,9 +5207,25 @@ impl Window {
         self.invalidator.debug_assert_paint();
 
         let scale_factor = self.scale_factor();
-        let content_mask = self.content_mask();
+        let mut content_mask = self.content_mask();
         let opacity = self.element_opacity();
         let color: Background = color.into();
+        let zoom = self.element_zoom;
+        let path = if zoom.is_identity() {
+            path
+        } else {
+            let origin = zoom.point(Point::default());
+            let offset = point(origin.x.0 / scale_factor, origin.y.0 / scale_factor);
+            let scale = zoom.point(point(ScaledPixels(1.), ScaledPixels(0.))).x.0 - origin.x.0;
+            content_mask.bounds = Bounds {
+                origin: point(
+                    px(content_mask.bounds.origin.x.0 * scale + offset.x),
+                    px(content_mask.bounds.origin.y.0 * scale + offset.y),
+                ),
+                size: content_mask.bounds.size.map(|l| l * scale),
+            };
+            path.zoomed(scale, offset)
+        };
         self.next_frame.scene.insert_primitive(PaintedPath::new(
             path,
             scale_factor,
@@ -5193,7 +5245,7 @@ impl Window {
     ) {
         self.invalidator.debug_assert_paint();
         let underline = self.underline(origin, width, style);
-        self.next_frame.scene.insert_primitive(underline);
+        self.insert_primitive(underline);
     }
 
     /// Paint a strikethrough into the scene for the next frame at the current z-index.
@@ -5215,7 +5267,7 @@ impl Window {
         };
         let opacity = self.element_opacity();
 
-        self.next_frame.scene.insert_primitive(Underline {
+        self.insert_primitive(Underline {
             order: 0,
             pad: 0,
             bounds,
@@ -5288,7 +5340,7 @@ impl Window {
             let content_mask = self.snapped_content_mask();
 
             if subpixel_rendering {
-                self.next_frame.scene.insert_primitive(SubpixelSprite {
+                self.insert_primitive(SubpixelSprite {
                     order: 0,
                     pad: 0,
                     bounds,
@@ -5298,7 +5350,7 @@ impl Window {
                     transformation: TransformationMatrix::unit(),
                 });
             } else {
-                self.next_frame.scene.insert_primitive(MonochromeSprite {
+                self.insert_primitive(MonochromeSprite {
                     order: 0,
                     animation: SpriteAnimationId::NONE,
                     bounds,
@@ -5381,7 +5433,7 @@ impl Window {
             let content_mask = self.snapped_content_mask();
             let opacity = self.element_opacity();
 
-            self.next_frame.scene.insert_primitive(PolychromeSprite {
+            self.insert_primitive(PolychromeSprite {
                 order: 0,
                 pad: 0,
                 grayscale: false.into(),
@@ -5471,11 +5523,15 @@ impl Window {
             tile,
             transformation,
         };
+        let sprite = match Primitive::from(sprite).zoomed(&self.element_zoom) {
+            Primitive::MonochromeSprite(sprite) => sprite,
+            _ => unreachable!(),
+        };
         match animation {
-            Some(animation) => self
-                .next_frame
-                .scene
-                .insert_animated_sprite(sprite, animation),
+            Some(animation) => self.next_frame.scene.insert_animated_sprite(
+                sprite,
+                animation.zoomed(&self.element_zoom, self.scale_factor),
+            ),
             None => self.next_frame.scene.insert_primitive(sprite),
         }
 
@@ -5575,7 +5631,7 @@ impl Window {
             .scale(self.scale_factor());
         let opacity = self.element_opacity();
 
-        self.next_frame.scene.insert_primitive(PolychromeSprite {
+        self.insert_primitive(PolychromeSprite {
             order: 0,
             pad: 0,
             grayscale: grayscale.into(),
@@ -5603,7 +5659,7 @@ impl Window {
 
         let bounds = self.snap_bounds(bounds);
         let content_mask = self.snapped_content_mask();
-        self.next_frame.scene.insert_primitive(PaintSurface {
+        self.insert_primitive(PaintSurface {
             order: 0,
             bounds,
             content_mask,
@@ -10468,6 +10524,44 @@ mod tests {
             cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
                 .unwrap();
         }
+    }
+
+    #[gpui::test]
+    fn test_element_zoom_scales_what_is_painted_about_its_center(cx: &mut TestAppContext) {
+        test_underline_paint_at_scales(cx, |window| {
+            let sf = window.scale_factor();
+            let square = Bounds::new(point(px(0.), px(0.)), size(px(100.), px(100.)));
+            window.next_frame.scene.clear();
+            window.with_element_zoom(Some(0.5), square.center(), |window| {
+                window.paint_quad(
+                    crate::fill(square, hsla(0., 0., 0., 1.))
+                        .border_widths(px(2.))
+                        .border_color(hsla(0., 0., 1., 1.)),
+                );
+                window.with_element_zoom(Some(0.5), square.center(), |window| {
+                    window.paint_quad(crate::fill(square, hsla(0., 0., 0., 1.)));
+                });
+            });
+            window.paint_quad(crate::fill(square, hsla(0., 0., 0., 1.)));
+            let quads = window.next_frame.scene.quads.clone();
+            let device = |x: f32, w: f32| {
+                Bounds::new(
+                    point(ScaledPixels(x * sf), ScaledPixels(x * sf)),
+                    size(ScaledPixels(w * sf), ScaledPixels(w * sf)),
+                )
+            };
+            let border = |q: &crate::Quad| q.content_mask.bounds.intersect(&q.bounds).size;
+            assert_eq!(quads[0].bounds, device(25., 50.));
+            let full = window.snap_border_widths(crate::Edges::all(px(2.))).top;
+            assert_eq!(border(&quads[1]).height, full * 0.5, "borders thin with it");
+            let last = quads.len() - 1;
+            assert_eq!(quads[last - 1].bounds, device(37.5, 25.), "zooms compose");
+            assert_eq!(
+                quads[last].bounds,
+                device(0., 100.),
+                "and end with their element"
+            );
+        });
     }
 
     fn paint_test_underlines(window: &mut Window, paint: impl FnOnce(&mut Window)) -> &[Underline] {

@@ -748,6 +748,13 @@ pub trait Styled: Sized {
         self
     }
 
+    /// Draws this element and its children scaled by `zoom` about their center. Layout and
+    /// hit testing are unchanged.
+    fn zoom(mut self, zoom: f32) -> Self {
+        self.style().zoom = Some(zoom);
+        self
+    }
+
     /// Sets the grid columns of this element.
     fn grid_cols(mut self, cols: u16) -> Self {
         self.style().grid_cols = Some(GridTemplate {
