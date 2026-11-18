@@ -5,7 +5,6 @@ use gpui::{
     AtlasTextureId, Bounds, ContentMask, DevicePixels, PaintSurface, PaintedPath, PrimitiveBatch,
     ScaledPixels, Scene, Size, quad_depth, quad_depth_scale, size,
 };
-#[cfg(any(test, feature = "bench-support", feature = "test-support"))]
 use image::RgbaImage;
 use objc2::{Message, rc::Retained, runtime::ProtocolObject};
 use objc2_core_foundation::{CFRetained, CGSize};
@@ -27,7 +26,6 @@ use objc2_metal::{
     MTLResourceOptions, MTLStorageMode, MTLStoreAction, MTLTexture, MTLTextureDescriptor,
     MTLTextureUsage, MTLViewport,
 };
-#[cfg(any(test, feature = "bench-support", feature = "test-support"))]
 use objc2_metal::{MTLBlitCommandEncoder, MTLOrigin, MTLRegion, MTLSize};
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 use parking_lot::Mutex;
@@ -604,7 +602,6 @@ impl MetalRenderer {
     ///
     /// Note: This requires a layer-backed renderer. For headless rendering,
     /// use `render_scene_to_image()` instead.
-    #[cfg(any(test, feature = "test-support"))]
     pub fn render_to_image(&mut self, scene: &Scene) -> Result<RgbaImage> {
         let layer = self
             .layer
@@ -640,7 +637,6 @@ impl MetalRenderer {
 
     /// Renders a scene into a new offscreen texture of `size` and reads it
     /// back, without presenting anything.
-    #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
     fn render_offscreen(&mut self, scene: &Scene, size: Size<DevicePixels>) -> Result<RgbaImage> {
         if size.width.0 <= 0 || size.height.0 <= 0 {
             anyhow::bail!("Invalid size for render_offscreen: {:?}", size);
@@ -1324,7 +1320,6 @@ fn new_command_encoder_for_texture(
     Ok(command_encoder)
 }
 
-#[cfg(any(test, feature = "bench-support", feature = "test-support"))]
 fn read_texture_to_image(texture: &ProtocolObject<dyn MTLTexture>) -> Result<RgbaImage> {
     let width = texture.width() as u32;
     let height = texture.height() as u32;
