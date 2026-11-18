@@ -450,6 +450,37 @@ impl Primitive {
             .intersect(&self.content_mask().bounds)
     }
 
+    /// Narrows where this primitive draws to `rect`.
+    fn clip_to(&mut self, rect: Bounds<ScaledPixels>) {
+        let mask = match self {
+            Primitive::Shadow(p) => &mut p.content_mask,
+            Primitive::Quad(p) => &mut p.content_mask,
+            Primitive::Path(p) => &mut p.paint.content_mask,
+            Primitive::Underline(p) => &mut p.content_mask,
+            Primitive::MonochromeSprite(p) => &mut p.content_mask,
+            Primitive::SubpixelSprite(p) => &mut p.content_mask,
+            Primitive::PolychromeSprite(p) => &mut p.content_mask,
+            Primitive::Surface(p) => &mut p.content_mask,
+        };
+        mask.bounds = mask.bounds.intersect(&rect);
+    }
+
+    /// Scales how opaque this primitive draws by `alpha`.
+    fn fade(&mut self, alpha: f32) {
+        match self {
+            Primitive::Shadow(p) => p.color = p.color.opacity(alpha),
+            Primitive::Quad(p) => {
+                p.background = p.background.opacity(alpha);
+                p.border_color = p.border_color.opacity(alpha);
+            }
+            Primitive::Underline(p) => p.color = p.color.opacity(alpha),
+            Primitive::MonochromeSprite(p) => p.color = p.color.opacity(alpha),
+            Primitive::SubpixelSprite(p) => p.color = p.color.opacity(alpha),
+            Primitive::PolychromeSprite(p) => p.opacity *= alpha,
+            Primitive::Path(_) | Primitive::Surface(_) => {}
+        }
+    }
+
     pub fn content_mask(&self) -> &ContentMask<ScaledPixels> {
         match self {
             Primitive::Shadow(shadow) => &shadow.content_mask,
@@ -944,6 +975,107 @@ impl Primitive {
             path @ Primitive::Path(_) => path,
         }
     }
+}
+
+/// Fades what is painted out toward the edges of `bounds`, over `edges`, in device pixels.
+///
+/// Renderers know nothing of it: a primitive crossing a fading band is drawn as strips, each
+/// clipped to its share of the band and made as transparent as that part of it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Fade {
+    pub bounds: Bounds<ScaledPixels>,
+    pub edges: Edges<ScaledPixels>,
+}
+
+/// Height in device pixels of each strip a fading band is drawn in. Two is too fine to see
+/// as steps and keeps the strips few.
+const FADE_STEP: f32 = 2.;
+
+impl Fade {
+    /// Hands `out` the pieces of `primitive` to draw: none outside the bounds, the part clear
+    /// of the bands whole, and strips across the bands.
+    pub(crate) fn split(&self, primitive: Primitive, out: &mut impl FnMut(Primitive)) {
+        if matches!(primitive, Primitive::Path(_) | Primitive::Surface(_)) {
+            return out(primitive);
+        }
+        let clip = primitive.clipped_bounds();
+        let b = self.bounds;
+        let rows = spans(
+            clip.top().0,
+            clip.bottom().0,
+            b.top().0,
+            b.bottom().0,
+            self.edges.top.0,
+            self.edges.bottom.0,
+        );
+        let cols = spans(
+            clip.left().0,
+            clip.right().0,
+            b.left().0,
+            b.right().0,
+            self.edges.left.0,
+            self.edges.right.0,
+        );
+        if let ([(_, _, 1.)], [(_, _, 1.)]) = (&rows[..], &cols[..]) {
+            return out(primitive);
+        }
+        for &(y0, y1, ay) in &rows {
+            for &(x0, x1, ax) in &cols {
+                let alpha = ay * ax;
+                if alpha <= 0. {
+                    continue;
+                }
+                let mut piece = primitive.clone();
+                piece.clip_to(Bounds::from_corners(
+                    Point::new(ScaledPixels(x0), ScaledPixels(y0)),
+                    Point::new(ScaledPixels(x1), ScaledPixels(y1)),
+                ));
+                if alpha < 1. {
+                    piece.fade(alpha);
+                }
+                out(piece);
+            }
+        }
+    }
+}
+
+/// `start..end` along one axis, cut where it meets fading bands `near` in from `lo` and `far`
+/// in from `hi`: each piece with how opaque it draws. What lies outside `lo..hi` is left out.
+fn spans(
+    start: f32,
+    end: f32,
+    lo: f32,
+    hi: f32,
+    near: f32,
+    far: f32,
+) -> SmallVec<[(f32, f32, f32); 8]> {
+    let mut out = SmallVec::new();
+    let (start, end) = (start.max(lo), end.min(hi));
+    let near_end = lo + near.max(0.);
+    let far_start = hi - far.max(0.);
+    let mut at = start;
+    while at < end {
+        let next = if at < near_end {
+            (lo + ((at - lo) / FADE_STEP).floor() * FADE_STEP + FADE_STEP).min(near_end)
+        } else if at < far_start {
+            far_start
+        } else {
+            hi - ((hi - at) / FADE_STEP).ceil() * FADE_STEP + FADE_STEP
+        }
+        .min(end)
+        .max(at + f32::EPSILON);
+        let mid = (at + next) / 2.;
+        let mut alpha: f32 = 1.;
+        if near > 0. {
+            alpha = alpha.min((mid - lo) / near);
+        }
+        if far > 0. {
+            alpha = alpha.min((hi - mid) / far);
+        }
+        out.push((at, next, alpha.clamp(0., 1.)));
+        at = next;
+    }
+    out
 }
 
 /// A data type representing a 2 dimensional transformation that can be applied to an element.

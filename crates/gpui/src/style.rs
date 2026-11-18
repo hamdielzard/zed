@@ -304,6 +304,10 @@ pub struct Style {
     /// How much this element and its children are scaled when drawn, about their center.
     pub zoom: Option<f32>,
 
+    /// How far in from each edge this element and its children fade out to transparent.
+    #[refineable]
+    pub fade: Edges<AbsoluteLength>,
+
     /// The grid columns of this element
     /// Roughly equivalent to the Tailwind `grid-cols-<number>`
     pub grid_cols: Option<GridTemplate>,
@@ -813,6 +817,7 @@ impl Default for Style {
             mouse_cursor: None,
             opacity: None,
             zoom: None,
+            fade: Edges::<AbsoluteLength>::zero(),
             grid_rows: None,
             grid_cols: None,
             grid_location: None,

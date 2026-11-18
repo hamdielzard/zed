@@ -755,6 +755,18 @@ pub trait Styled: Sized {
         self
     }
 
+    /// Fades this element and its children out to transparent over `edges` from each of its
+    /// edges, for example where a list scrolls out of view. Layout and hit testing are
+    /// unchanged.
+    fn fade_edges(mut self, edges: crate::Edges<crate::Pixels>) -> Self {
+        let fade = &mut self.style().fade;
+        fade.top = Some(edges.top.into());
+        fade.right = Some(edges.right.into());
+        fade.bottom = Some(edges.bottom.into());
+        fade.left = Some(edges.left.into());
+        self
+    }
+
     /// Sets the grid columns of this element.
     fn grid_cols(mut self, cols: u16) -> Self {
         self.style().grid_cols = Some(GridTemplate {

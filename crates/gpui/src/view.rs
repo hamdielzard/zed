@@ -4,7 +4,7 @@ use crate::{
     LayoutId, PaintIndex, Pixels, PrepaintStateIndex, Render, RenderOnce, Size, Style,
     StyleRefinement, TextStyle, WeakEntity,
 };
-use crate::{Empty, Window, Zoom};
+use crate::{Empty, Fade, Window, Zoom};
 use anyhow::Result;
 use collections::FxHashSet;
 use refineable::Refineable;
@@ -327,6 +327,7 @@ struct ViewElementCacheKey {
     text_style: TextStyle,
     opacity: f32,
     zoom: Zoom,
+    fade: Option<Fade>,
 }
 
 #[cfg(not(gpui_hot_reload))]
@@ -540,6 +541,7 @@ fn prepaint_view(
                 let text_style = window.text_style();
                 let opacity = window.element_opacity();
                 let zoom = window.element_zoom();
+                let fade = window.element_fade();
 
                 // Opacity is compared by bits so that a NaN opacity still matches itself
                 // and the view keeps using its cache.
@@ -549,6 +551,7 @@ fn prepaint_view(
                     && element_state.cache_key.text_style == text_style
                     && element_state.cache_key.opacity.to_bits() == opacity.to_bits()
                     && element_state.cache_key.zoom == zoom
+                    && element_state.cache_key.fade == fade
                     && !window.dirty_views.contains(&entity_id)
                     && !window.refreshing
                 {
@@ -586,6 +589,7 @@ fn prepaint_view(
                             text_style,
                             opacity,
                             zoom,
+                            fade,
                         },
                     },
                 )

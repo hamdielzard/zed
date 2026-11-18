@@ -1,5 +1,6 @@
 #[cfg(feature = "profiler")]
 use crate::DebugFrameOverlayMode;
+use crate::Fade;
 #[cfg(any(feature = "inspector", debug_assertions))]
 use crate::Inspector;
 #[cfg(feature = "profiler")]
@@ -1255,6 +1256,7 @@ pub struct Window {
     pub(crate) element_offset_stack: Vec<Point<Pixels>>,
     pub(crate) element_opacity: f32,
     element_zoom: Zoom,
+    element_fade: Option<Fade>,
     pub(crate) content_mask_stack: Vec<ContentMask<Pixels>>,
     pub(crate) requested_autoscroll: Option<Bounds<Pixels>>,
     /// The [`TextInputConfiguration`] most recently forwarded to the platform
@@ -2416,6 +2418,7 @@ impl Window {
             content_mask_stack: Vec::new(),
             element_opacity: 1.0,
             element_zoom: Zoom::IDENTITY,
+            element_fade: None,
             requested_autoscroll: None,
             last_text_input_configuration: None,
             focused_text_input: None,
@@ -4626,13 +4629,54 @@ impl Window {
         self.element_zoom
     }
 
+    /// Fades what `f` paints out over `edges` in from each edge of `bounds`, in place of any
+    /// fade already in effect.
+    pub(crate) fn with_element_fade<R>(
+        &mut self,
+        edges: &Edges<crate::AbsoluteLength>,
+        bounds: Bounds<Pixels>,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let rem = self.rem_size();
+        let edges = edges.map(|l| l.to_pixels(rem));
+        if edges == Edges::default() {
+            return f(self);
+        }
+        let sf = self.scale_factor();
+        let bounds = self.element_zoom.bounds(bounds.scale(sf));
+        let scale = self
+            .element_zoom
+            .bounds(Bounds::new(
+                Point::default(),
+                size(ScaledPixels(1.), ScaledPixels(1.)),
+            ))
+            .size
+            .width
+            .0;
+        let previous = self.element_fade.replace(Fade {
+            bounds,
+            edges: edges.map(|e| ScaledPixels(e.0 * sf * scale)),
+        });
+        let result = f(self);
+        self.element_fade = previous;
+        result
+    }
+
+    pub(crate) fn element_fade(&self) -> Option<Fade> {
+        self.element_fade
+    }
+
     fn insert_primitive(&mut self, primitive: impl Into<Primitive>) {
-        let primitive = primitive.into();
-        if self.element_zoom.is_identity() {
-            self.next_frame.scene.insert_primitive(primitive);
-        } else {
-            let primitive = primitive.zoomed(&self.element_zoom);
-            self.next_frame.scene.insert_primitive(primitive);
+        let mut primitive = primitive.into();
+        if !self.element_zoom.is_identity() {
+            primitive = primitive.zoomed(&self.element_zoom);
+        }
+        match self.element_fade {
+            None => self.next_frame.scene.insert_primitive(primitive),
+            Some(fade) => {
+                let scene = &mut self.next_frame.scene;
+                fade.split(primitive, &mut |p| scene.insert_primitive(p));
+            }
         }
     }
 
@@ -10523,6 +10567,51 @@ mod tests {
             cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
                 .unwrap();
         }
+    }
+
+    #[gpui::test]
+    fn test_element_fade_draws_edges_in_strips_that_fade_out(cx: &mut TestAppContext) {
+        test_underline_paint_at_scales(cx, |window| {
+            let sf = window.scale_factor();
+            let list = Bounds::new(point(px(0.), px(0.)), size(px(100.), px(100.)));
+            let edges = crate::Edges {
+                top: crate::AbsoluteLength::Pixels(px(10.)),
+                bottom: crate::AbsoluteLength::Pixels(px(10.)),
+                ..crate::Edges::<crate::AbsoluteLength>::zero()
+            };
+            window.next_frame.scene.clear();
+            window.with_element_fade(&edges, list, |window| {
+                let row = Bounds::new(point(px(0.), px(-20.)), size(px(100.), px(140.)));
+                window.paint_quad(crate::fill(row, hsla(0., 0., 0., 1.)));
+            });
+            let quads = window.next_frame.scene.quads.clone();
+            let shown = |q: &crate::Quad| q.content_mask.bounds.intersect(&q.bounds);
+            let top = shown(&quads[0]);
+            assert_eq!(top.top(), ScaledPixels(0.), "nothing above the list");
+            assert!(
+                quads[0].background.solid.a < 0.2,
+                "the edge is nearly clear"
+            );
+            let middle = quads
+                .iter()
+                .find(|q| q.background.solid.a == 1.)
+                .expect("a solid middle");
+            assert_eq!(shown(middle).top(), ScaledPixels(10. * sf));
+            assert_eq!(shown(middle).bottom(), ScaledPixels(90. * sf));
+            let last = shown(quads.last().unwrap());
+            assert_eq!(
+                last.bottom(),
+                ScaledPixels(100. * sf),
+                "nothing below the list"
+            );
+            let alphas: Vec<f32> = quads
+                .iter()
+                .take_while(|q| q.background.solid.a < 1.)
+                .map(|q| q.background.solid.a)
+                .collect();
+            assert!(alphas.windows(2).all(|w| w[0] < w[1]), "{alphas:?}");
+            assert!(alphas.len() > 3, "a ramp, not a step: {alphas:?}");
+        });
     }
 
     #[gpui::test]
